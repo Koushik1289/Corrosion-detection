@@ -12,7 +12,7 @@ CORROSION_COLOR = (255, 69, 0)  # Red-Orange
 CRACK_COLOR = (0, 255, 255)     # Cyan
 DEFAULT_COLOR = (0, 255, 0)
 LINE_THICKNESS = 3
-DEFAULT_MODEL = 'gemini-2.5-flash' # Good for speed and vision tasks
+DEFAULT_MODEL = 'gemini-2.5-flash'
 
 # =========================
 # GEMINI INTEGRATION (Client Setup and Structured Output)
@@ -24,7 +24,7 @@ def get_gemini_client():
     api_key = st.secrets.get("gemini_api_key")
     
     if not api_key:
-        st.error("🔑 API Key Error: Gemini API key not found in `st.secrets['gemini_api_key']`.")
+        st.error("🔑 API Key Error: Please ensure `gemini_api_key` is set in `.streamlit/secrets.toml`.")
         return None
     
     try:
@@ -71,14 +71,13 @@ def detect_and_get_boxes(client, image: Image.Image):
     prompt = (
         "Analyze the image for corrosion, cracks, or any structural defects. "
         "For every defect found, output a JSON object containing the 2D bounding box normalized to 0-1000, "
-        "the label ('Corrosion' or 'Crack'), and a confidence score. "
+        "the label ('Corrosion', 'Crack', or specific defect name), and a confidence score. "
         "If no defects are found, return an empty array []."
     )
     
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=bbox_schema,
-        # Use a low temperature for deterministic (object detection-like) output
         temperature=0.1
     )
 
@@ -92,7 +91,7 @@ def detect_and_get_boxes(client, image: Image.Image):
         # The response.text will be a valid JSON string matching the schema
         json_output = json.loads(response.text)
         
-        # We also ask Gemini for a separate summary for a nice report
+        # Get a separate summary for a nice report
         summary_prompt = "Provide a detailed textual summary of the corrosion and cracks detected in the image based on the coordinates you provided. Describe severity and general location (e.g., 'severe corrosion in the upper right'). Do NOT mention 'Gemini', 'AI', or 'model' in the output. Just provide the expert inspection report."
         
         summary_response = client.models.generate_content(
@@ -105,13 +104,17 @@ def detect_and_get_boxes(client, image: Image.Image):
     except APIError as e:
         return None, f"API Error: Failed to get detection results. (Code: {e})"
     except json.JSONDecodeError:
-        return None, "Error: Could not parse structured output from service. Try a clearer image."
+        return None, "Error: Could not parse structured output from service. Try a clearer image or adjust the prompt."
     except Exception as e:
         return None, f"An unexpected error occurred during analysis: {e}"
 
 
 def annotate_image(image: Image.Image, detections: list):
-    """Draws bounding boxes on the image based on normalized coordinates."""
+    """
+    Draws bounding boxes on the image based on normalized coordinates.
+    
+    FIXED: Replaced deprecated draw.textsize() with draw.textbbox().
+    """
     img_width, img_height = image.size
     annotated_image = image.copy().convert("RGB")
     draw = ImageDraw.Draw(annotated_image)
@@ -125,11 +128,11 @@ def annotate_image(image: Image.Image, detections: list):
 
     results_summary = []
     
-    for i, det in enumerate(detections):
+    for det in detections:
         # Coordinates are normalized to 0-1000: [y_min, x_min, y_max, x_max]
-        y_min_norm, x_min_norm, y_max_norm, x_max_norm = det['box_2d']
-        label = det['label']
-        confidence = det['confidence']
+        y_min_norm, x_min_norm, y_max_norm, x_max_norm = det.get('box_2d', [0, 0, 0, 0])
+        label = det.get('label', 'Unknown Defect')
+        confidence = det.get('confidence', 0.0)
         
         # Convert normalized coordinates (0-1000) to actual pixel coordinates
         x_min = int(x_min_norm * img_width / 1000)
@@ -154,9 +157,13 @@ def annotate_image(image: Image.Image, detections: list):
         
         # 2. Draw Label Text and Background
         display_text = f"{label} ({confidence*100:.0f}%)"
-        text_w, text_h = draw.textsize(display_text, font=font)
         
-        # Ensure label background is not off-screen
+        # Use draw.textbbox() - the modern, correct Pillow method
+        left, top, right, bottom = draw.textbbox((0, 0), display_text, font=font)
+        text_w = right - left
+        text_h = bottom - top
+
+        # Ensure label background is placed correctly, avoiding going off the top edge
         label_x = x_min
         label_y = max(0, y_min - text_h - 2)
         
@@ -165,9 +172,10 @@ def annotate_image(image: Image.Image, detections: list):
             fill=color
         )
         
+        # Text color is white for visibility against colored background
         draw.text((label_x, label_y), display_text, fill=(255, 255, 255), font=font)
         
-        results_summary.append(f"- **{label}** ({confidence*100:.0f}%) detected at pixel coordinates ({x_min}, {y_min}) to ({x_max}, {y_max})")
+        results_summary.append(f"- **{label}** ({confidence*100:.0f}%) localized at: X={x_min}-{x_max}, Y={y_min}-{y_max}")
 
     return annotated_image, results_summary
 
@@ -185,7 +193,8 @@ st.title("🔍 Automated Infrastructure Inspection")
 st.markdown(
     """
 This application performs a detailed visual inspection of structural surfaces 
-to identify and visually **highlight** corrosion, cracks, and other defects.
+to identify, **localize, and visually highlight** corrosion, cracks, and other defects.
+The detection service runs in the background.
 """
 )
 st.markdown("---")
@@ -238,5 +247,3 @@ if uploaded_file:
                  st.warning("⚠️ **DEFECTS IDENTIFIED.** Review the highlighted areas above for attention.")
             else:
                  st.info("✅ No structural defects requiring attention were identified.")
-
-# The provided video discusses using machine learning for corrosion detection, providing the necessary context for the type of computer vision task this app is performing. [Automated corrosion detection using machine learning](https://www.youtube.com/watch?v=FDq9TK5PPo0)
