@@ -5,42 +5,55 @@ import tensorflow as tf
 import io
 
 # -----------------------------
-# CONFIG
+# LOAD MODEL
 # -----------------------------
-# If the model was trained on a specific input size, set it here.
-# Common sizes: (150, 150), (180, 180), (224, 224)
-IMG_SIZE = (150, 150)  # change if your model used a different size
-
-CLASS_NAMES = ["NO CORROSION", "CORROSION"]  # 0 -> no, 1 -> yes
-
-
 @st.cache_resource
 def load_model():
     model = tf.keras.models.load_model("saved_model.h5")
     return model
 
 
-def preprocess_image(image: Image.Image) -> np.ndarray:
+def get_model_img_size(model):
+    """
+    Read input spatial size (H, W) from model.input_shape.
+    Works for Sequential and Functional models.
+    """
+    input_shape = model.input_shape
+
+    # Some models have a list of input shapes
+    if isinstance(input_shape, (list, tuple)) and isinstance(input_shape[0], (list, tuple)):
+        input_shape = input_shape[0]
+
+    # Expected something like (None, H, W, C)
+    if len(input_shape) >= 4:
+        return (int(input_shape[1]), int(input_shape[2]))
+    else:
+        # Fallback if something weird happens
+        return (128, 128)
+
+
+def preprocess_image(image: Image.Image, img_size) -> np.ndarray:
     """
     Convert a PIL image to a model-ready tensor:
     - RGB
-    - resized
+    - resized to img_size
     - normalized to [0, 1]
     - add batch dimension
     """
     img = image.convert("RGB")
-    img = img.resize(IMG_SIZE)
+    img = img.resize(img_size)
     arr = np.array(img).astype("float32") / 255.0
     arr = np.expand_dims(arr, axis=0)
     return arr
 
 
 def predict_image(model, image: Image.Image):
-    x = preprocess_image(image)
+    img_size = get_model_img_size(model)
+    x = preprocess_image(image, img_size)
     preds = model.predict(x)
-    # For a binary sigmoid model, preds is shape (1, 1)
+    # Assuming binary sigmoid output: shape (1, 1)
     prob_corrosion = float(preds[0][0])
-    return prob_corrosion
+    return prob_corrosion, img_size
 
 
 # -----------------------------
@@ -60,16 +73,23 @@ Upload infrastructure or drone images and let the CNN model classify whether **c
 )
 
 model = load_model()
-st.success("Model loaded successfully from `saved_model.h5` ✅")
+model_img_size = get_model_img_size(model)
+
+st.success(
+    f"Model loaded successfully from `saved_model.h5` ✅  \n"
+    f"Expected input size: **{model_img_size[0]}×{model_img_size[1]}**"
+)
 
 uploaded_files = st.file_uploader(
-    "Upload one or more images (JPG/PNG)", 
-    type=["jpg", "jpeg", "png"], 
+    "Upload one or more images (JPG/PNG)",
+    type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
 
+CLASS_NAMES = ["NO CORROSION", "CORROSION"]
+
 threshold = st.slider(
-    "Decision threshold for corrosion", 
+    "Decision threshold for corrosion",
     min_value=0.1, max_value=0.9, value=0.5, step=0.05,
     help="Predictions above this probability will be labeled as CORROSION."
 )
@@ -88,14 +108,15 @@ if uploaded_files:
 
         # Run prediction
         with st.spinner("Running corrosion detection..."):
-            prob_corrosion = predict_image(model, image)
+            prob_corrosion, img_size = predict_image(model, image)
 
         label_idx = 1 if prob_corrosion >= threshold else 0
         label = CLASS_NAMES[label_idx]
 
         st.markdown(
             f"**Prediction:** `{label}`  \n"
-            f"**Corrosion probability:** `{prob_corrosion:.4f}`"
+            f"**Corrosion probability:** `{prob_corrosion:.4f}`  \n"
+            f"(Image was resized internally to **{img_size[0]}×{img_size[1]}**)"
         )
 
         st.progress(prob_corrosion)
